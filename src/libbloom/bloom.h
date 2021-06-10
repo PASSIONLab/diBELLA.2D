@@ -3,10 +3,15 @@
  *  All rights reserved.
  *
  *  This file is under BSD license. See LICENSE file.
+ *
+ *  Modified April 2021 to support concurrent updates from OMP threads 
+ *  without introducing false negatives.
  */
 
 #ifndef _BLOOM_H
 #define _BLOOM_H
+
+#include <omp.h>
 
 /** ***************************************************************************
  * Structure to keep track of one bloom filter.  Caller needs to
@@ -31,6 +36,8 @@ struct bloom
   double bpe;
   unsigned char * bf;
   int ready;
+  int lock_table_size;
+  omp_lock_t* lock_table;
 };
 
 
@@ -49,18 +56,19 @@ struct bloom
  *
  * Parameters:
  * -----------
- *     bloom   - Pointer to an allocated struct bloom (see above).
- *     entries - The expected number of entries which will be inserted.
- *     error   - Probability of collision (as long as entries are not
+ *     bloom    - Pointer to an allocated struct bloom (see above).
+ *     entries  - The expected number of entries which will be inserted.
+ *     error    - Probability of collision (as long as entries are not
  *               exceeded).
- *
+ *     nthreads - The maximum number of concurrent threads that will access the filter.
+*                 By default, the lock table is sized as 100 * nthreads.
  * Return:
  * -------
  *     0 - on success
  *     1 - on failure
  *
  */
-int bloom_init(struct bloom * bloom, int entries, double error);
+int bloom_init(struct bloom * bloom, int entries, double error, int nthreads);
 
 
 /** ***************************************************************************
@@ -82,6 +90,12 @@ int bloom_init(struct bloom * bloom, int entries, double error);
  */
 int bloom_check(struct bloom * bloom, const void * buffer, int len);
 
+/** ***************************************************************************
+ * This is identical to the function above, but operates under correctly in
+ * case the filter is being concurrently inserted into by other threads.
+ */
+
+int bloom_check_concurrent_safe(struct bloom * bloom, const void * buffer, int len);
 
 /** ***************************************************************************
  * Add the given element to the bloom filter.
@@ -103,13 +117,17 @@ int bloom_check(struct bloom * bloom, const void * buffer, int len);
  */
 int bloom_add(struct bloom * bloom, const void * buffer, int len);
 
+/*
+ * Same as the function above, but is guaranteed to work correctly if there
+ * are concurrent reads / inserts into the bloom filter. 
+ */
+int bloom_add_concurrent_safe(struct bloom * bloom, const void * buffer, int len);
 
 /** ***************************************************************************
  * Print (to stdout) info about this bloom filter. Debugging aid.
  *
  */
 void bloom_print(struct bloom * bloom);
-
 
 /** ***************************************************************************
  * Deallocate internal storage.
@@ -127,4 +145,3 @@ void bloom_print(struct bloom * bloom);
 void bloom_free(struct bloom * bloom);
 
 #endif
-

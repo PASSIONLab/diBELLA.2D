@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cassert>
 #include <assert.h>
+#include <omp.h>
+#include <iostream>
 
 #ifdef VM_USE_SPARSEPP
 #include "sparsepp.h"
@@ -44,6 +46,11 @@ public:
         return MurmurHash3_x64_64(&key, sizeof(Key));
     }
 };
+
+/*
+ * Modified VectorMap to make it concurrent, but I should probably 
+ * switch to something more efficient, like libcuckoo.
+ */
 
 using namespace std;
 template < class Key, class T, class Hash=_hash<Key>, class Compare=less<Key>, class Equal=equal_to<Key>, class Allocator=allocator< pair< const Key, T> > >
@@ -91,6 +98,7 @@ private:
 	VM _data;
 	size_type _vectorMask;
 	hasher _hasher;
+	omp_lock_t* bucket_locks;
 
 public:
 	VectorMap(size_t reserveSize = VM_MIN_NUM_BUCKETS * VM_TARGET_BUCKET_SIZE): _data(), _vectorMask(0), _hasher()
@@ -98,6 +106,10 @@ public:
 		size_t numBuckets = nextPowerOf2((reserveSize+targetBucketSize()-1) / targetBucketSize());
 		_data.resize(numBuckets);
 		_vectorMask = numBuckets-1;
+		bucket_locks = new omp_lock_t[numBuckets];
+		for(size_t i = 0; i < numBuckets; i++) {
+			omp_init_lock(bucket_locks + i);
+		}
 	}
 
 	VectorMap(size_t reserveSize, size_t numBuckets): _data(), _vectorMask(0), _hasher()
@@ -105,9 +117,18 @@ public:
 		numBuckets = nextPowerOf2(numBuckets);
 		_data.resize(numBuckets);
 		_vectorMask = numBuckets-1;
+		bucket_locks = new omp_lock_t[numBuckets];
+		for(size_t i = 0; i < numBuckets; i++) {
+			omp_init_lock(bucket_locks + i);
+		}
 	}
 
-	~VectorMap() {}
+	~VectorMap() {
+		for(int i = 0; i < _data.size(); i++) {
+			omp_destroy_lock(bucket_locks + i);
+		}
+		delete bucket_locks;
+	}
 	bool empty() const NOEXCEPT { return size() == 0; }
 	size_type size() const NOEXCEPT
     {
@@ -255,29 +276,76 @@ public:
 	iterator find (const key_type& k)
     {
 		size_type bidx = getBucketIdx(k);
+		omp_set_lock(bucket_locks + bidx);
 		typename Map::iterator it = _data[bidx].find(k);
-		if (it == _data[bidx].end())
+		if (it == _data[bidx].end()) {
+			omp_unset_lock(bucket_locks + bidx);
 			return end();
-		else
+		}
+		else {
+			omp_unset_lock(bucket_locks + bidx);
 			return iterator(_data, bidx, it);
+		}
 	}
 
 	const_iterator find (const key_type& k) const
     {
-
 		size_type bidx = getBucketIdx(k);
+		omp_set_lock(bucket_locks + bidx);
 		typename Map::const_iterator it = _data[bidx].find(k);
-		if (it == _data[bidx].end())
+		if (it == _data[bidx].end()) {
+			omp_unset_lock(bucket_locks + bidx);
 			return end();
-		else
+		}
+		else {
+			omp_unset_lock(bucket_locks + bidx);
 			return const_iterator(_data, bidx, it);
+		}
+	}
+
+	/*
+	 * Both of these functions return a reference to a lock maintained
+	 * by this hash table along with the iterator itself (returned)
+	 * by a pointer. Neither of these functions will unset the lock
+	 * before returning. The caller function is responsible for unsetting
+	 * the lock returned by the function. 
+	 * 
+	 */
+	iterator find_without_unlock (const key_type& k, omp_lock_t** lock_ptr)
+    {
+		size_type bidx = getBucketIdx(k);
+		*lock_ptr = bucket_locks + bidx;
+		omp_set_lock(bucket_locks + bidx);
+		typename Map::iterator it = _data[bidx].find(k);
+		if (it == _data[bidx].end()) {
+			return end();
+		}
+		else {
+			return iterator(_data, bidx, it);
+		}
+	}
+
+	const_iterator find_without_unlock (const key_type& k, omp_lock_t** lock_ptr) const
+    {
+		size_type bidx = getBucketIdx(k);
+		*lock_ptr = bucket_locks + bidx;
+		omp_set_lock(bucket_locks + bidx);
+		typename Map::const_iterator it = _data[bidx].find(k);
+		if (it == _data[bidx].end()) {
+			return end();
+		}
+		else {
+			return const_iterator(_data, bidx, it);
+		}
 	}
 
 	pair<iterator,bool> insert(const value_type& val)
     {
 		size_type bidx = getBucketIdx(val.first);
+		omp_set_lock(bucket_locks + bidx);
 		pair<typename Map::iterator, bool> ret = _data[bidx].insert(val);
 		pair<iterator, bool> ret2(iterator(_data, bidx, ret.first), ret.second);
+		omp_unset_lock(bucket_locks + bidx);
 		return ret2;
 	}
 
@@ -296,6 +364,7 @@ public:
 		}
 	}
 
+	// To-Do: Should parallelize this! 
 	iterator erase(const_iterator position)
     {
 		size_type bidx = getBucketIdx(position->first);
@@ -377,8 +446,18 @@ public:
 		}
         else if (mySize == 0)
         {
+			for(size_t i = 0; i < _data.size(); i++) {
+				omp_destroy_lock(bucket_locks + i);
+			}
+			delete bucket_locks;
+
 			_data.resize(n);
 			_vectorMask = n-1;
+
+			bucket_locks = new omp_lock_t[_data.size()];
+			for(size_t i = 0; i < _data.size(); i++) {
+				omp_init_lock(bucket_locks + i);
+			}
 		}
 		assert(_data.size() == n);
 		assert(_vectorMask == n-1);

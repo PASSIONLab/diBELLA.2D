@@ -207,7 +207,7 @@ int main(int argc, char **argv)
   PSpMat<PosInRead>::MPI_DCCols A =
       dibella::KmerOps::GenerateA(
           seq_count, dfd, klength, kstride,
-          alph, parops, tp);
+          alph, parops, tp, nthreads);
 
   tu.print_str("Matrix A: ");
   tu.print_str("\nLoad imbalance: " + std::to_string(A.LoadImbalance()) + "\n");

@@ -501,7 +501,9 @@ SeedExtendXdrop::apply_batch
 	delete [] strands;
 
 	auto start_time = std::chrono::system_clock::now();
-	
+
+	std::vector<ushort> perprocessarray(nreads, 0);
+
 	// Dump alignment info
 	#pragma omp parallel
 	{
